@@ -1,5 +1,6 @@
 package com.redhat.datagrid;
 
+import java.io.StringWriter;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -11,14 +12,14 @@ import org.infinispan.container.DataContainer;
 import org.infinispan.container.entries.InternalCacheEntry;
 import org.infinispan.tasks.ServerTask;
 import org.infinispan.tasks.TaskContext;
+import org.infinispan.tasks.TaskExecutionMode;
 
 /**
  * @author Tristan Tarrant &lt;tristan@infinispan.org&gt;
  * @since 12.0
  **/
-public class ExpirationDumper implements ServerTask<Void> {
+public class ExpirationDumper implements ServerTask<String> {
 
-   public static final Long ZERO = Long.valueOf(0);
    private Cache<?, ?> cache;
 
    @Override
@@ -27,33 +28,35 @@ public class ExpirationDumper implements ServerTask<Void> {
    }
 
    @Override
-   public Void call() throws Exception {
+   public String call() throws Exception {
       Logger logger = Logger.getLogger("EXPIRATIONS");
       logger.info("EXPIRATION STATS DUMP");
-      DataContainer dc = cache.getAdvancedCache().getDataContainer();
+      DataContainer<?, ?> dc = cache.getAdvancedCache().getDataContainer();
       Map<Long, AtomicInteger> lifespanDistribution = initHistogram();
       Map<Long, AtomicInteger> maxIdleDistribution = initHistogram();
-      Iterator<InternalCacheEntry<?, ?>> it1 = dc.iteratorIncludingExpired();
+      Iterator<? extends InternalCacheEntry<?, ?>> it1 = dc.iteratorIncludingExpired();
       while (it1.hasNext()) {
          InternalCacheEntry<?, ?> entry = it1.next();
-         Long ls = entry.canExpire() ? entry.getLifespan() : ZERO;
+         long ls = entry.canExpire() ? entry.getLifespan() / 1000 : 0;
          updateHistogram(ls, lifespanDistribution);
-         Long mi = entry.canExpire() ? entry.getMaxIdle() : ZERO;
+         long mi = entry.canExpire() ? entry.getMaxIdle() / 1000 : 0;
          updateHistogram(mi, maxIdleDistribution);
       }
-      printHistogram("Lifespan", lifespanDistribution);
-      printHistogram("MaxIdle", maxIdleDistribution);
-
-      return null;
+      StringWriter writer = new StringWriter();
+      writer.write(cache.getAdvancedCache().getRpcManager().getAddress() + ":\n");
+      printHistogram(writer, "Lifespan", lifespanDistribution);
+      printHistogram(writer, "MaxIdle", maxIdleDistribution);
+      return writer.toString();
    }
 
    private Map<Long, AtomicInteger> initHistogram() {
       Map<Long, AtomicInteger> map = new HashMap<>();
-      map.put(ZERO, new AtomicInteger());
+      map.put(0L
+            , new AtomicInteger());
       return map;
    }
 
-   void updateHistogram(Long value, Map<Long, AtomicInteger> distribution) {
+   void updateHistogram(long value, Map<Long, AtomicInteger> distribution) {
       AtomicInteger count = distribution.get(value);
       if (count == null) {
          count = new AtomicInteger(1);
@@ -63,13 +66,15 @@ public class ExpirationDumper implements ServerTask<Void> {
       }
    }
 
-   void printHistogram(String kind, Map<Long, AtomicInteger> distribution) {
-      Logger logger = Logger.getLogger("EXPIRATIONS");
-      Iterator<Map.Entry<Long, AtomicInteger>> it2 = distribution.entrySet().iterator();
-      while (it2.hasNext()) {
-         Map.Entry<Long, AtomicInteger> next = it2.next();
-         logger.info(kind + " = " + next.getKey() + " Count = " + next.getValue());
+   void printHistogram(StringWriter writer, String kind, Map<Long, AtomicInteger> distribution) {
+      for (Map.Entry<Long, AtomicInteger> next : distribution.entrySet()) {
+         writer.write(kind + " = " + next.getKey() + "s Count = " + next.getValue() + "\n");
       }
+   }
+
+   @Override
+   public TaskExecutionMode getExecutionMode() {
+      return TaskExecutionMode.ALL_NODES;
    }
 
    @Override
